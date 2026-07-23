@@ -6,7 +6,8 @@ use crate::extensions::{
 use crate::{AccessTokenPrefix, RequestSigner};
 
 use crate::request::{
-    XADProperties, XASTProperties, XASUProperties, XSTSProperties, XTokenRequest,
+    XADProperties, XADPropertiesRPS, XASTProperties, XASTPropertiesWin, XASUProperties,
+XSTSProperties, XTokenRequest,
 };
 use crate::{
     error::Error,
@@ -943,7 +944,39 @@ impl XalAuthenticator {
             .send()
             .await?
             .json_ex::<response::SisuAuthorizationResponse>()
-            .await}
+            .await
+    }
+
+    /// Authorize via SISU flow after completing OAuth2 Authentication
+    /// Unlike the normal sisu, this windows device sisu needs RST2 tokens
+    /// and works for titles that have blocked the mobile xal flow
+    pub async fn sisu_authorize_rps(
+        &mut self,
+        access_token: &str,
+        device_token: &str,
+        sisu_session_id: Option<&str>,
+    ) -> Result<response::SisuRPSAuthorizationResponse, Error> {
+        let json_body = request::SisuAuthorizationRequest {
+            access_token: access_token,
+            app_id: &self.app_params.client_id,
+            device_token: device_token,
+            sandbox: &self.sandbox_id.clone(),
+            site_name: "user.auth.xboxlive.com",
+            session_id: sisu_session_id.map(|a| a.to_string()),
+            proof_key: self.request_signer.get_proof_key(),
+        };
+
+        self.client
+            .post(Constants::XBOX_SISU_AUTHORIZE_URL)
+            .add_cv(&mut self.ms_cv)?
+            .json(&json_body)
+            .sign(&mut self.request_signer, None)
+            .await?
+            .send()
+            .await?
+            .json_ex::<response::SisuRPSAuthorizationResponse>()
+            .await
+    }
 
     /// Requests a Xbox Live Device Token from the Xbox Live authentication service.
     ///
@@ -1011,7 +1044,39 @@ impl XalAuthenticator {
             .send()
             .await?
             .json_ex::<response::DeviceToken>()
-            .await}
+            .await
+    }
+
+    /// Requests a Xbox Live Device Token from the Xbox Live authentication service.
+    /// This method takes an RPS Device ticket from windows system auth
+    pub async fn get_device_token_rps(
+        &mut self,
+        rps: String,
+    ) -> Result<response::DeviceToken, Error> {
+        let json_body = XTokenRequest::<XADPropertiesRPS> {
+            relying_party: Constants::RELYING_PARTY_AUTH_XBOXLIVE,
+            token_type: "JWT",
+            properties: XADPropertiesRPS {
+                auth_method: "RPS",
+                rps_ticket: &rps,
+                site_name: "user.auth.xboxlive.com",
+                version: &self.client_params.client_version,
+                proof_key: self.request_signer.get_proof_key(),
+            },
+        };
+
+        self.client
+            .post(Constants::XBOX_DEVICE_AUTH_URL)
+            .header("x-xbl-contract-version", "1")
+            .add_cv(&mut self.ms_cv)?
+            .json(&json_body)
+            .sign(&mut self.request_signer, None)
+            .await?
+            .send()
+            .await?
+            .json_ex::<response::DeviceToken>()
+            .await
+    }
 
     /// Retrieves a Xbox User Token for a specified Access Token.
     ///
@@ -1086,7 +1151,41 @@ impl XalAuthenticator {
             .log()
             .await?
             .json_ex::<response::UserToken>()
-            .await}
+            .await
+    }
+
+    /// Retrieves a Title Token for a specified Access Token and Device Token.
+    pub async fn get_title_token_win(
+        &mut self,
+        device_token: &str,
+        title_id: i64,
+    ) -> Result<response::TitleToken, Error> {
+        let json_body = XTokenRequest::<XASTPropertiesWin> {
+            relying_party: Constants::RELYING_PARTY_AUTH_XBOXLIVE,
+            token_type: "JWT",
+            properties: XASTPropertiesWin {
+                proof_key: self.request_signer.get_proof_key(),
+                device_token: device_token,
+                title_id: title_id,
+            },
+        };
+
+        self.client
+            .post(Constants::XBOX_TITLE_AUTH_URL)
+            .header("x-xbl-contract-version", "1")
+            .add_cv(&mut self.ms_cv)?
+            .json(&json_body)
+            .sign(&mut self.request_signer, None)
+            .await?
+            .log()
+            .await?
+            .send()
+            .await?
+            .log()
+            .await?
+            .json_ex::<response::TitleToken>()
+            .await
+    }
 
     /// Retrieves a Title Token for a specified Access Token and Device Token.
     ///

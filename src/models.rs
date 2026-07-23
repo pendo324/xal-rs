@@ -181,6 +181,26 @@ pub mod request {
         pub proof_key: ProofKey,
     }
 
+    /// Xbox Authentication Device Properties for Windows Device Auth via RPS Ticket
+    ///
+    /// Subtype of [`XTokenRequest`] request body.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    pub struct XADPropertiesRPS<'a> {
+        /// Authentication method, usually "JWT"
+        pub auth_method: &'a str,
+        /// RST2 Device Ticket needs to be created via clepkey hmac
+        pub rps_ticket: &'a str,
+        /// Usually user
+        pub site_name: &'a str,
+        /// Version of client OS
+        pub version: &'a str,
+        /// JWK proof key, related to HTTP request signing
+        ///
+        /// Can be obtained from an instance of [`crate::RequestSigner`]
+        pub proof_key: ProofKey,
+    }
+
     /// Xbox Authentication Title Properties
     ///
     /// Subtype of [`XTokenRequest`] request body.
@@ -195,6 +215,23 @@ pub mod request {
         pub site_name: &'a str,
         /// RPS Ticket
         pub rps_ticket: &'a str,
+    }
+
+    /// Xbox Authentication Title Properties
+    ///
+    /// Subtype of [`XTokenRequest`] request body.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    pub struct XASTPropertiesWin<'a> {
+        /// Device token
+        pub device_token: &'a str,
+        /// JWK proof key, related to HTTP request signing
+        ///
+        /// Can be obtained from an instance of [`crate::RequestSigner`]
+        pub proof_key: ProofKey,
+
+        /// Title id of the Xbox live app
+        pub title_id: i64,
     }
 
     /// Xbox Authentication User Properties
@@ -370,6 +407,22 @@ pub mod response {
         pub web_page: String,
         /// Xbox Live sandbox
         pub sandbox: String,
+        /// Modern gamertag indication
+        pub use_modern_gamertag: Option<bool>,
+    }
+
+    /// Sisu authorization response for rps auth
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    #[serde(rename_all = "PascalCase")]
+    pub struct SisuRPSAuthorizationResponse {
+        /// Title Token
+        pub title_token: TitleToken,
+        /// User Token
+        pub user_token: UserToken,
+        /// Authorization Token
+        pub authorization_token: XSTSToken,
+        /// Web page
+        pub web_page: String,
         /// Modern gamertag indication
         pub use_modern_gamertag: Option<bool>,
     }
