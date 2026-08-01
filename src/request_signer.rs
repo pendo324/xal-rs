@@ -328,12 +328,52 @@ impl RequestSigning<http::Request<Vec<u8>>> for RequestSigner {
 }
 
 impl RequestSigner {
-    /// Creates a new instance of [`RequestSigner`]
+    /// Creates a new instance of [`RequestSigner`] with a freshly generated keypair
+    ///
+    /// # Notes
+    ///
+    /// The generated key is discarded when the signer is dropped. A proof key is only
+    /// useful for as long as the tokens bound to it live, so callers which persist
+    /// tokens across process restarts want [`RequestSigner::from_key_bytes`] instead.
     pub fn new() -> Self {
         Self {
             keypair: SecretKey::random(&mut rand::thread_rng()),
             signature_policy_cache: SignaturePolicyCache::default(),
         }
+    }
+
+    /// Creates a [`RequestSigner`] around an existing keypair
+    pub fn from_key(keypair: SecretKey) -> Self {
+        Self {
+            keypair,
+            signature_policy_cache: SignaturePolicyCache::default(),
+        }
+    }
+
+    /// Creates a [`RequestSigner`] from a raw big-endian P-256 private scalar
+    ///
+    /// Counterpart of [`RequestSigner::to_key_bytes`]. Lets callers persist and restore
+    /// a proof key without taking a direct dependency on `p256`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use xal::RequestSigner;
+    /// let signer = RequestSigner::new();
+    /// let restored = RequestSigner::from_key_bytes(&signer.to_key_bytes()).unwrap();
+    /// assert_eq!(signer.get_proof_key(), restored.get_proof_key());
+    /// ```
+    pub fn from_key_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let keypair = SecretKey::from_slice(bytes)
+            .map_err(|e| Error::GeneralError(format!("Invalid P-256 private key: {e}")))?;
+        Ok(Self::from_key(keypair))
+    }
+
+    /// Exports the private scalar as raw big-endian bytes
+    ///
+    /// Counterpart of [`RequestSigner::from_key_bytes`].
+    pub fn to_key_bytes(&self) -> Vec<u8> {
+        self.keypair.to_bytes().to_vec()
     }
 
     /// Returns the proof key as JWK
@@ -406,6 +446,90 @@ impl RequestSigner {
             timestamp: filetime_bytes.to_vec(),
             signature,
         })
+    }
+
+    /// Create a `Signature` header value from the individual parts of a request
+    ///
+    /// The [`RequestSigning`] implementations are the comfortable path when a whole
+    /// request object is at hand. This is the escape hatch for callers which only have
+    /// the pieces - notably `XUserGetTokenAndSignature`, whose caller hands over the
+    /// method, URL, headers and body separately and expects a header value back.
+    pub fn sign_header_from_parts(
+        &self,
+        signing_policy: &SigningPolicy,
+        timestamp: DateTime<Utc>,
+        method: &str,
+        path_and_query: &str,
+        authorization: &str,
+        body: &[u8],
+    ) -> Result<String, Error> {
+        Ok(self
+            .sign_raw(
+                signing_policy.version,
+                timestamp,
+                method,
+                path_and_query,
+                authorization,
+                body,
+                signing_policy.max_body_bytes,
+            )?
+            .to_string())
+    }
+
+    /// Create a `Signature` header value for a request, resolving the signing policy from `url`
+    ///
+    /// Returns `Ok(None)` when the URL is not covered by any signing policy, i.e. when the
+    /// request must be sent unsigned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use xal::{RequestSigner, SignaturePolicyCache};
+    /// # tokio_test::block_on(async {
+    /// let mut signer = RequestSigner::new();
+    /// # let endpoints = serde_json::from_str(include_str!("../testdata/title_endpoints.json")).unwrap();
+    /// # signer.signature_policy_cache = SignaturePolicyCache::new(endpoints);
+    /// let signature = signer
+    ///     .sign_header_for_url(
+    ///         "https://example.xboxlive.com/users/me",
+    ///         "GET",
+    ///         "XBL3.0 x=1234;token",
+    ///         b"",
+    ///         None,
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    /// assert!(signature.is_some());
+    /// # })
+    /// ```
+    pub async fn sign_header_for_url(
+        &mut self,
+        url: &str,
+        method: &str,
+        authorization: &str,
+        body: &[u8],
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<Option<String>, Error> {
+        let Some(signing_policy) = self.signature_policy_cache.find_policy_for_url(url).await?
+        else {
+            return Ok(None);
+        };
+
+        let parsed = url::Url::parse(url)?;
+        let path_and_query = match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        };
+
+        self.sign_header_from_parts(
+            &signing_policy,
+            timestamp.unwrap_or_else(Utc::now),
+            method,
+            &path_and_query,
+            authorization,
+            body,
+        )
+        .map(Some)
     }
 
     /// Verify the signature of a HTTP request (lower level)
@@ -951,6 +1075,70 @@ mod test {
         assert!(signer
             .verify_message(signature, &request, MAX_BODY_BYTES)
             .is_ok())
+    }
+
+    /// Same captured request as `verify_real_request`, but driven through the public
+    /// parts-based API instead of a request object - this is the path
+    /// `XUserGetTokenAndSignature` takes.
+    ///
+    /// The signature bytes themselves cannot be compared against the capture, since the
+    /// real client signed with a random nonce. The version/timestamp prefix is compared
+    /// directly, and the signature is checked by verifying it.
+    #[test]
+    fn sign_header_from_parts_matches_real_request() {
+        const EXPECTED: &str = "AAAAAQHY4xgs5DyIujFG5E5MZ4D1xjd9Up+H4AKLoyBHd95MAUZcabUN//Y/gijed4vvKtlfp4Cd4dJzVhpK0m+sYZcYRqQjBEKAZw==";
+        const BODY: &[u8] = br#"{"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT","Properties":{"AuthMethod":"ProofOfPossession","Id":"{e51d4344-196a-4550-9e27-f6c5006a9949}","DeviceType":"Android","Version":"8.0.0","ProofKey":{"kty":"EC","alg":"ES256","crv":"P-256","x":"GJS1AAhiPYw0ZSQJDCF8kcZkKAc2tRWXAN6Yw-o_hMQ","y":"UAQJHUc_yVIhUQgIvoED3kt0JDz_G8jgXys_XR2s-Xc","use":"sig"}}}"#;
+
+        let private_key = Base64::decode_vec(
+            "MHcCAQEEIGIVtz0AIm4o6el+9VLmuGuOSqBx6UGWlCHn/oD3ljrtoAoGCCqGSM49AwEHoUQDQgAEGJS1AAhiPYw0ZSQJDCF8kcZkKAc2tRWXAN6Yw+o/hMRQBAkdRz/JUiFRCAi+gQPeS3QkPP8byOBfKz9dHaz5dw=="
+        ).expect("Failed deserializing EC private key");
+        let signer = RequestSigner::from_key(SecretKey::from_sec1_der(&private_key).unwrap());
+
+        // Recover the timestamp the real request was signed at, it is part of the header
+        let expected_bytes = XboxWebSignatureBytes::from_str(EXPECTED).unwrap();
+        let timestamp: DateTime<Utc> = FileTime::new(u64::from_be_bytes(
+            expected_bytes.timestamp.as_slice().try_into().unwrap(),
+        ))
+        .try_into()
+        .unwrap();
+
+        let policy = SigningPolicy {
+            version: 1,
+            supported_algorithms: vec![SigningAlgorithm::ES256],
+            max_body_bytes: MAX_BODY_BYTES,
+        };
+
+        let signature = signer
+            .sign_header_from_parts(&policy, timestamp, "POST", "/device/authenticate", "", BODY)
+            .expect("Failed signing from parts");
+
+        // Policy version and timestamp are canonicalized identically to the real client
+        assert_eq!(&signature[..16], &EXPECTED[..16]);
+
+        // ... and the signature over the canonicalized message verifies
+        let request = HttpMessageToSign {
+            method: "POST".to_owned(),
+            path_and_query: "/device/authenticate".to_owned(),
+            authorization: String::new(),
+            body: BODY.to_vec(),
+        };
+        assert!(signer
+            .verify_message(
+                XboxWebSignatureBytes::from_str(&signature).unwrap(),
+                &request,
+                MAX_BODY_BYTES
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn key_bytes_roundtrip_preserves_proof_key() {
+        let signer = get_request_signer();
+        let restored = RequestSigner::from_key_bytes(&signer.to_key_bytes())
+            .expect("Failed restoring signer from key bytes");
+
+        assert_eq!(signer.get_proof_key(), restored.get_proof_key());
+        assert_eq!(signer.to_key_bytes(), restored.to_key_bytes());
     }
 
     #[tokio::test]

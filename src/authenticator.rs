@@ -430,6 +430,17 @@ impl XalAuthenticator {
         self.request_signer.clone()
     }
 
+    /// Replace the request signer, and with it the proof key sent during authentication
+    ///
+    /// Both constructors generate a fresh keypair, which means every authenticator
+    /// instance proves possession of a different key. Tokens are bound to the proof key
+    /// presented when they were issued, so callers which persist tokens across
+    /// authenticator instances - or across process restarts - must install the same
+    /// signer here, otherwise later signed requests are rejected.
+    pub fn set_request_signer(&mut self, request_signer: RequestSigner) {
+        self.request_signer = request_signer;
+    }
+
     /// Get redirection Url
     pub fn get_redirect_uri(&self) -> Option<Url> {
         self.app_params
