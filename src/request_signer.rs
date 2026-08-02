@@ -551,7 +551,13 @@ impl SignaturePolicyCache {
     /// # })
     /// ```
     pub async fn find_policy_for_url(&mut self, url: &str) -> Result<Option<SigningPolicy>, Error> {
-        let url = url::Url::parse(url)?;
+        let mut url = url::Url::parse(url)?;
+
+        if url.scheme() == "wss" {
+            let _ = url.set_scheme("https");
+        } else if url.scheme() == "ws" {
+            let _ = url.set_scheme("http");
+        }
 
         if !["http", "https"].contains(&url.scheme()) {
             return Err(Error::GeneralError(format!(
@@ -610,6 +616,65 @@ impl SignaturePolicyCache {
             }
         }
     }
+
+    /// Find the relying party for the given URL.
+    pub async fn find_relying_party_for_url(&mut self, url: &str) -> Result<Option<String>, Error> {
+        let mut url = url::Url::parse(url)?;
+
+        if url.scheme() == "wss" {
+            let _ = url.set_scheme("https");
+        } else if url.scheme() == "ws" {
+            let _ = url.set_scheme("http");
+        }
+
+        if !["http", "https"].contains(&url.scheme()) {
+            return Err(Error::GeneralError(format!(
+                "Url with invalid protocol passed, expected http or https, url={url}"
+            )));
+        }
+
+        let endpoints = match self.endpoints.as_ref() {
+            Some(eps) => eps.to_owned(),
+            None => {
+                info!("No cached TitleEndpoints found, attempting download of new copy");
+                let eps = get_endpoints().await?;
+                self.endpoints = Some(eps.clone());
+                eps
+            }
+        };
+
+        let matching_endpoint = endpoints
+            .end_points
+            .iter()
+            .filter(|e| {
+                e.protocol.eq_ignore_ascii_case(url.scheme())
+                    && url
+                        .host_str()
+                        .map(|host| match e.host_type.as_str() {
+                            "fqdn" => host.eq_ignore_ascii_case(&e.host),
+                            "wildcard" => host.ends_with(e.host.trim_start_matches('*')),
+                            _ => false,
+                        })
+                        .unwrap_or(false)
+                    && e.path
+                        .as_ref()
+                        .map(|path| url.path() == path)
+                        .unwrap_or(true)
+            })
+            .max_by_key(|e| e.host.len());
+
+        match matching_endpoint {
+            Some(ep) => {
+                println!("Identified Title endpoint={ep:?} for URL={url} {url:?}");
+                Ok(ep.relying_party.clone())
+            }
+            None => {
+                println!("No matched SigningPolicy for url={url:?} found");
+                Ok(None)
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]

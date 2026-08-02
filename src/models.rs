@@ -472,10 +472,13 @@ pub mod response {
         /// Collection of available endpoints
         pub end_points: Vec<TitleEndpoint>,
         /// Collection of signing policies
+        #[serde(default)]
         pub signature_policies: Vec<SigningPolicy>,
         /// Collection of title endpoint certificates
+        #[serde(default)]
         pub certs: Vec<TitleEndpointCertificate>,
         /// List of root certificates
+        #[serde(default)]
         pub root_certs: Vec<String>,
     }
 
