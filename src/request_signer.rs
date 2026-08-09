@@ -11,7 +11,7 @@ use crate::{
 use async_trait::async_trait;
 use base64ct::{self, Base64, Encoding};
 use chrono::prelude::*;
-use log::{debug, info, warn};
+use log::{debug, info};
 use nt_time::FileTime;
 use p256::{
     ecdsa::{
@@ -736,8 +736,14 @@ impl SignaturePolicyCache {
 
                 Ok(Some(policy.to_owned()))
             }
+            // Not an error, and not rare: the endpoint table only lists the hosts Xbox Live
+            // requires a signature for, so every call to a host outside it - a title's own
+            // services, or a listed host that carries a relying party but no
+            // `SignaturePolicyIndex` - lands here and is correctly sent unsigned. Logging
+            // it at `warn` made ordinary traffic (a Realms availability poll every five
+            // seconds) read as a repeating auth failure.
             None => {
-                warn!("No matched SigningPolicy for url={url:?} found");
+                debug!("No SigningPolicy covers url={url:?}; the request will be sent unsigned");
                 Ok(None)
             }
         }
@@ -791,11 +797,13 @@ impl SignaturePolicyCache {
 
         match matching_endpoint {
             Some(ep) => {
-                println!("Identified Title endpoint={ep:?} for URL={url} {url:?}");
+                debug!("Identified Title endpoint={ep:?} for URL={url} {url:?}");
                 Ok(ep.relying_party.clone())
             }
+            // Says relying party, not signing policy: this is the other lookup, and the
+            // message here was a copy of its neighbour's.
             None => {
-                println!("No matched SigningPolicy for url={url:?} found");
+                debug!("No Title endpoint covers url={url:?}, so no relying party for it");
                 Ok(None)
             }
         }
