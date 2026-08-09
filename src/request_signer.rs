@@ -707,7 +707,9 @@ impl SignaturePolicyCache {
                     && url
                         .host_str()
                         .map(|host| match e.host_type.as_str() {
-                            "fqdn" => host == e.host,
+                            // Hosts are case-insensitive; the sibling
+                            // `find_relying_party_for_url` already compares them that way.
+                            "fqdn" => host.eq_ignore_ascii_case(&e.host),
                             "wildcard" => host.ends_with(e.host.trim_start_matches('*')),
                             _ => false,
                         })
